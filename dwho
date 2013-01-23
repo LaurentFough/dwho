@@ -1,0 +1,86 @@
+#!/bin/bash
+#
+# Usage: dwho domain.com dns_record_type
+# Example: dwho google.com mx
+# If an additional entry is parsed (a|mx|txt|ns), then a whois will not occur, nor will IP lookup. 
+# Questions: Andrew Glenn
+#	ag@andrewglenn.net
+
+# Begin Configuration Options
+
+
+export dns_servers=( 4.2.2.2 ns1.rackspace.com )
+
+# End Configuration Options
+
+TXT_BLD=$(tput bold)
+TXT_RED=$(tput setaf 1)
+TXT_GREEN=$(tput setaf 2)
+TXT_YLW=$(tput setaf 3)
+TXT_BLUE=$(tput setaf 4)
+TXT_PURPLE=$(tput setaf 5)
+TXT_CYAN=$(tput setaf 6)
+TXT_WHITE=$(tput setaf 7)
+TXT_RESET=$(tput sgr0)
+
+function parse_whois() {
+	echo -e "${TXT_WHITE}Whois: ${TXT_YLW}"
+	whois  $1 | sed -nE '/>>>/,/end/d;/^\ {3}Domain/,/^\ {3}Expiration/p'
+	echo -e "${TXT_RESET}"
+}
+
+function dns_lookup() {
+	echo -e "${TXT_WHITE}"
+	echo -e "DNS: ${TXT_CYAN}"
+	for server in ${dns_servers[@]}; do
+		echo -e "\n${TXT_WHITE}$server${TXT_CYAN}"
+		dig $1 $2 @$server | sed -e '1,9d' -e '/^\;/d' -e '/^$/d'
+	done
+	# for lookups via the local resolvers. 	
+	dig $1 $2 | sed -e '1,9d' -e '/^\;/d' -e '/^$/d'
+	echo -e "${TXT_WHITE}"
+	echo "IP Info:"
+	echo -e "${TXT_GREEN}"
+	if [[ -z "$2" ]]; then
+		for ip in $( dig $1 $2 @4.2.2.2 | sed -e '1,9d' -e '/^\;/d' -e '/^$/d' | awk '{print $5}' ); do
+			check_ip $ip
+		done
+	else
+		echo "Skipped due to "$2" passed"
+	fi
+
+	echo -e "${TXT_RESET}"
+
+}
+
+function check_ip() {
+echo "$1	$(curl -sH "Accept: application/json" http://whois.arin.net/rest/ip/$1 |  sed -e 's/[{}]/''/g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | egrep '(customer|org)Ref' | sed 's/\"//g'| cut -d : -f 3)"
+
+}
+
+function help_me() {
+	echo "Usage: (domain|IP) [record_type]"
+	echo "Example: google.com mx"
+	echo 
+	echo "If a record_type is passed, IP ownership will not occur"
+	echo 
+	echo "NOTE: You must configure your own nameservers to query."
+	echo "See the array at the top of the script"
+}
+
+
+if [[ $# -eq 0 ]]; then 
+	help_me
+	exit 1 
+fi
+
+if [[ "$1" =~ [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]] &&  [[ -z "$2" ]]; then
+	check_ip $1
+	exit 0
+fi
+
+
+if [[ -z "$2" ]]; then
+	parse_whois $1
+fi
+dns_lookup $1 $2
