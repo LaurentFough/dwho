@@ -4,12 +4,12 @@
 # Example: dwho google.com mx
 # If an additional entry is parsed (a|mx|txt|ns), then a whois will not occur, nor will IP lookup. 
 # Questions: Andrew Glenn
-#	ag@andrewglenn.net
+#	andrew@andrewglenn.net
 
 # Begin Configuration Options
 
 
-export dns_servers=( 4.2.2.2 ns1.rackspace.com )
+export dns_servers=( 4.2.2.2 )
 
 # End Configuration Options
 
@@ -23,6 +23,37 @@ TXT_CYAN=$(tput setaf 6)
 TXT_WHITE=$(tput setaf 7)
 TXT_RESET=$(tput sgr0)
 
+function strip_ettera() {
+    while read data; do
+        echo "$data" | sed -e 's/^.*://g' -e 's/"//g'
+    done
+}
+
+function dns_sed_parse() {
+    while read data; do 
+        echo $data | sed -e '1,9d' -e '/^\;/d' -e '/^$/d'
+    done
+}
+
+function check_deps() {
+    for binary in dig whois; do 
+        $binary >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo "Error! $binary isn't found in \$PATH, or isn't installed."
+            exit 1
+        fi
+    done
+}
+
+function detailed_check_ip() {
+    array=($(curl -sH "Accept: application/json" http://whois.arin.net/rest/ip/$1 |  sed -e 's/[{}]/''/g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | egrep '((customer|org)Ref)|(start|end)Address|cidrLength' | sort | uniq))
+    export orgowner=$(echo ${array[*]} | egrep  -o '"orgRef.*:".*[[:space:]]"' | sed -e 's/^.*://g' -e 's/"//g')
+    export cidrlen=$(echo ${array[*]} | egrep  -o 'netBlocks.*"[[:space:]]' | sed -e 's/^.*://g' -e 's/"//g')
+    export startaddr=$(echo ${array[*]} | egrep  -o 'startAddress.*' | sed -e 's/^.*://g' -e 's/"//g')
+    export endaddr=$(echo ${array[*]} | egrep  -o 'endAddress":"\$":"([0-9]{1,3}\.){3}[0-9]{1,3}"' | sed -e 's/^.*://g' -e 's/"//g')
+    echo -e "$1\t$orgowner\nCIDR Length\t$cidrlen\nNetblock Start\t$startaddr\nNetblock End\t$endaddr"
+}
+
 function parse_whois() {
 	echo -e "${TXT_WHITE}Whois: ${TXT_YLW}"
 	whois  $1 | sed -nE '/>>>/,/end/d;/^\ {3}Domain/,/^\ {3}Expiration/p'
@@ -30,10 +61,14 @@ function parse_whois() {
 }
 
 function dns_lookup() {
-	echo -e "${TXT_WHITE}"
-	echo -e "DNS: ${TXT_CYAN}"
-	for server in ${dns_servers[@]}; do
-		echo -e "\n${TXT_WHITE}$server${TXT_CYAN}"
+        echo -e "${TXT_WHITE}"
+	echo -e "DNS: ${TXT_CYAN}\n"
+        for server in ${dns_servers[@]}; do
+
+	        if [ "$server" == "4.2.2.2" ]; then
+                    break
+                fi
+                echo -e "\n${TXT_WHITE}$server${TXT_CYAN}"
 		dig $1 $2 @$server | sed -e '1,9d' -e '/^\;/d' -e '/^$/d'
 	done
 	# for lookups via the local resolvers. 	
@@ -41,21 +76,56 @@ function dns_lookup() {
 	echo -e "${TXT_WHITE}"
 	echo "IP Info:"
 	echo -e "${TXT_GREEN}"
-	if [[ -z "$2" ]]; then
-		for ip in $( dig $1 $2 @4.2.2.2 | sed -e '1,9d' -e '/^\;/d' -e '/^$/d' | awk '{print $5}' ); do
-			check_ip $ip
+        if [[ -z "$2" ]]; then
+		for ip in $( dig $1 $2 @4.2.2.2 | sed -e '1,9d' -e '/^\;/d' -e '/^$/d' |  awk '{if ($4 != "NS") print $5}'
+                ); do
+                    export iparray="$iparray $ip"
+		    check_ip $ip
 		done
 	else
-		echo "Skipped due to "$2" passed"
+		echo "Skipped due to \"$2\" passed"
 	fi
 
 	echo -e "${TXT_RESET}"
 
 }
 
-function check_ip() {
-echo "$1	$(curl -sH "Accept: application/json" http://whois.arin.net/rest/ip/$1 |  sed -e 's/[{}]/''/g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | egrep '(customer|org)Ref' | sed 's/\"//g'| cut -d : -f 3)"
+function ns_investigate() {
+    echo -e "${TXT_WHITE}"
+    echo -e "NS Investigation: ${TXT_CYAN}\n"
+    for ns in $(dig $1 ns |sed -e '1,9d' -e '/^\;/d' -e '/^$/d'|  awk '{if ($4 == "NS") print $5}'); do 
+        echo -e "${TXT_BLUE}$ns\t${TXT_GREEN}$(check_ip $(dig +short $ns))"
+    done
+    echo    
+}
 
+function reverse_dns() {
+    echo -e "${TXT_WHITE}Reverse DNS: ${TXT_RED}\n"
+    for ip in $iparray; do
+        echo -e "rDNS: $ip\t$(dig -x $ip |sed -e '1,9d' -e '/^\;/d' -e '/^$/d'|awk '{if ($4 == "PTR") print $5}')"
+    done
+    echo -e "${TXT_RESET}"
+}
+
+function detailed_ip_loop() {
+    echo -e "${TXT_WHITE}"
+    echo -e "Detailed IP Report: ${TXT_BLD}${TXT_PURPLE}\n"
+    for ip in $iparray; do 
+        detailed_check_ip $ip
+        echo
+    done
+}
+
+function check_ip() {
+    echo "$1	$(curl -sH "Accept: application/json" http://whois.arin.net/rest/ip/$1 |  sed -e 's/[{}]/''/g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | egrep '(customer|org)Ref' | sed 's/\"//g'| cut -d : -f 3)"
+
+}
+
+function housekeeping () {
+    echo -e ${TXT_RESET}
+    for var in TXT_{BLD,RED,GREEN,YLW,BLUE,PYRPLE,CYAN,WHITE,RESET} var \
+                orgowner cirdlen {start,end}addr full_details; do
+    unset $var; done
 }
 
 function help_me() {
@@ -68,14 +138,18 @@ function help_me() {
 	echo "See the array at the top of the script"
 }
 
+check_deps
 
 if [[ $# -eq 0 ]]; then 
 	help_me
 	exit 1 
 fi
 
-if [[ "$1" =~ [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]] &&  [[ -z "$2" ]]; then
-	check_ip $1
+if [[ "$1" =~ ([0-9]{1,3}\.){3}[0-9]{1,3} ]] &&  [[ -z "$2" ]]; then
+        echo -e "${TXT_WHITE}"
+        echo -e "Detailed IP Report: ${TXT_BLD}${TXT_PURPLE}\n"
+        detailed_check_ip $1
+        echo -e ${TXT_RESET}
 	exit 0
 fi
 
@@ -83,4 +157,20 @@ fi
 if [[ -z "$2" ]]; then
 	parse_whois $1
 fi
+
+while getopts ":a" opt; do
+    case $opt in
+        a)
+            export full_details='yes'
+       ;;
+    esac
+done
+shift $((OPTIND-1))
 dns_lookup $1 $2
+
+if [ -n "$full_details" ]; then
+    ns_investigate $1
+    reverse_dns
+    detailed_ip_loop
+fi
+housekeeping
